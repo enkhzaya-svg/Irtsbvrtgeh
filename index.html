@@ -153,6 +153,9 @@
             
             // Задаргаанаас хассан (устгасан) бичлэгүүдийг хадгалах State
             const [excludedEntries, setExcludedEntries] = useState(new Set());
+            // Хоцролтын үйлдэл хадгалах State (date -> action: -1 (хасах) эсвэл 0 (нөлөөлөхгүй))
+            const [lateActions, setLateActions] = useState({});
+            const [customLateThresholds, setCustomLateThresholds] = useState({}); // Шинэ: Гараар зассан хоцролт тооцох цаг
             
             // Модалын төлөвүүд
             const [modalData, setModalData] = useState(null); 
@@ -162,6 +165,7 @@
             const [pendingModalData, setPendingModalData] = useState(null); 
             const [cellModalData, setCellModalData] = useState(null); 
             const [otEdits, setOtEdits] = useState({}); 
+            const [lateThresholdEdits, setLateThresholdEdits] = useState({}); // Шинэ: Хоцролтын цаг засах төлөв
 
             const handleFileUpload = (e, setData, setFileName) => {
                 const file = e.target.files[0];
@@ -235,6 +239,15 @@
                         }
                     });
                     setOtEdits(initialEdits);
+                } else if (cellType === 'Хоцролт') {
+                    let initialLateEdits = {};
+                    Object.entries(empRow.daily).forEach(([date, dayData]) => {
+                        // Ажилд ирсэн бүх өдрүүдийг харуулж тооцох цагийг засах боломж олгоно
+                        if (dayData.rawTimes?.in && !String(dayData.rawTimes.in).includes('--')) {
+                            initialLateEdits[date] = customLateThresholds[`${empRow.name}_${date}`] || lateThreshold;
+                        }
+                    });
+                    setLateThresholdEdits(initialLateEdits);
                 }
                 setCellModalData({ empName: empRow.name, type: cellType });
             };
@@ -256,6 +269,16 @@
                     newOtFixes[`${cellModalData.empName}_${date}`] = parseFloat(val) || 0;
                 });
                 setManualOtFixes(newOtFixes);
+                setCellModalData(null);
+            };
+
+            const saveLateThresholdFixes = () => {
+                if (!cellModalData) return;
+                const newThresholds = { ...customLateThresholds };
+                Object.entries(lateThresholdEdits).forEach(([date, val]) => {
+                    if (val) newThresholds[`${cellModalData.empName}_${date}`] = val;
+                });
+                setCustomLateThresholds(newThresholds);
                 setCellModalData(null);
             };
 
@@ -310,6 +333,7 @@
                             daily: {},
                             overtime: 0,
                             totalLateness: 0, 
+                            totalLatenessPenalty: 0, // Хоцролтын торгуулийн цаг
                             totalEffective: 0,
                             salary: 0,
                             allRequests: [] 
@@ -328,6 +352,7 @@
                     const name = getBaseName(rawName);
                     const emp = getEmp(name);
                     const fixKey = `${name}_${date}`;
+                    const lateActionKey = `${name}_${date}`;
                     
                     let timeIn = row['Ирсэн'] || row['Time in'];
                     let timeOut = row['Явсан'] || row['Time out'];
@@ -345,8 +370,16 @@
                     const isOfficeExcluded = excludedEntries.has(officeId);
                     const effectiveOfficeHours = isOfficeExcluded ? 0 : hours;
                     
-                    const lateMins = calculateLateness(timeIn, lateThreshold);
+                    const lateThresholdToUse = customLateThresholds[fixKey] || lateThreshold;
+                    const lateMins = calculateLateness(timeIn, lateThresholdToUse);
                     emp.totalLateness += lateMins;
+                    
+                    // Хоцролтын торгууль тооцох (минутыг цаг руу шилжүүлэх)
+                    // Хэрэв lateActions дотор тухайн өдөр хасах (-1) тохиргоотой байвал торгууль тооцно, эсрэгээрээ 0 бол тооцохгүй. Default нь 0 (Нөлөөлөхгүй)
+                    const lateAction = lateActions[lateActionKey] !== undefined ? lateActions[lateActionKey] : 0;
+                    if (lateAction === -1 && lateMins > 0) {
+                        emp.totalLatenessPenalty += (lateMins / 60);
+                    }
                     
                     emp.totalOffice += effectiveOfficeHours;
                     
@@ -475,6 +508,9 @@
                     
                     emp.totalEffective = emp.totalOffice + reqTotal;
                     emp.totalEffective += (otTimeAction - 1) * emp.overtime;
+                    
+                    // Хоцролтын торгуулийг нийт цагаас хасах
+                    emp.totalEffective -= emp.totalLatenessPenalty;
                     emp.totalEffective = Math.max(0, emp.totalEffective);
 
                     const monthlySalary = customSalaries[emp.name] !== undefined && customSalaries[emp.name] !== "" ? parseFloat(customSalaries[emp.name]) : defaultMonthlySalary;
@@ -506,7 +542,7 @@
                         salary: totalCompanySalary
                     }
                 };
-            }, [isCalculated, attendanceData, requestData, approvedIds, standardHours, lateThreshold, defaultMonthlySalary, monthlyTargetHours, overtimeMultiplier, customSalaries, manualTimeFixes, manualOtFixes, typeActions, individualReqActions, otTimeAction, otSalaryAction, excludedEntries]);
+            }, [isCalculated, attendanceData, requestData, approvedIds, standardHours, lateThreshold, defaultMonthlySalary, monthlyTargetHours, overtimeMultiplier, customSalaries, manualTimeFixes, manualOtFixes, typeActions, individualReqActions, otTimeAction, otSalaryAction, excludedEntries, lateActions, customLateThresholds]);
 
             // Excel (.xlsx) Шууд Татах функц (Үндсэн тайлан)
             const exportToExcel = () => {
@@ -1038,6 +1074,14 @@
                                     const isEx = excludedEntries.has(dayData.officeId);
                                     modalDetails.push({ id: dayData.officeId, date, start: formatTimeForInput(dayData.rawTimes?.in) || '-', end: formatTimeForInput(dayData.rawTimes?.out) || '-', duration: isEx ? 0 : dayData.originalOffice, originalDuration: dayData.originalOffice, desc: 'Оффист (Үндсэн ирц)', isExcluded: isEx });
                                 }
+                                // Хоцролтын мэдээлэл нэмэх
+                                if (dayData.lateness > 0) {
+                                     const lateActionKey = `${activeEmp.name}_${date}`;
+                                     const lateAction = lateActions[lateActionKey] !== undefined ? lateActions[lateActionKey] : 0;
+                                     if (lateAction === -1) {
+                                        modalDetails.push({ id: null, date, start: formatTimeForInput(dayData.rawTimes?.in) || '-', end: lateThreshold, duration: -(dayData.lateness / 60), originalDuration: -(dayData.lateness / 60), desc: `Хоцролт (${dayData.lateness} мин) - Хассан`, isExcluded: false });
+                                     }
+                                }
                             });
                             activeEmp.allRequests.forEach(r => {
                                 const action = individualReqActions[r.id] !== undefined ? individualReqActions[r.id] : (typeActions[r.type] !== undefined ? typeActions[r.type] : 0);
@@ -1058,8 +1102,9 @@
                             });
                         } else if (cellModalData.type === 'Хоцролт') {
                             Object.entries(activeEmp.daily).forEach(([date, dayData]) => {
-                                if (dayData.lateness > 0) {
-                                    modalDetails.push({ date, start: formatTimeForInput(dayData.rawTimes?.in) || '-', end: lateThreshold, duration: dayData.lateness, desc: `Хоцорсон (${dayData.lateness} мин)` });
+                                if (dayData.rawTimes?.in && !String(dayData.rawTimes.in).includes('--')) {
+                                    const usedThreshold = customLateThresholds[`${activeEmp.name}_${date}`] || lateThreshold;
+                                    modalDetails.push({ date, start: formatTimeForInput(dayData.rawTimes?.in) || '-', end: usedThreshold, duration: dayData.lateness, desc: dayData.lateness > 0 ? `Хоцорсон (${dayData.lateness} мин)` : 'Хоцроогүй', isExcluded: false });
                                 }
                             });
                         } else {
@@ -1090,8 +1135,11 @@
                                     row["Олгосон илүү цаг"] = Number((otEdits[d.date] !== undefined ? parseFloat(otEdits[d.date]) : 0).toFixed(2));
                                 } else if (cellModalData.type === 'Хоцролт') {
                                     row["Ирсэн цаг"] = d.start;
-                                    row["Тооцох цаг"] = d.end;
+                                    row["Тооцох цаг"] = lateThresholdEdits[d.date] || d.end;
                                     row["Хоцролт (минут)"] = d.duration;
+                                    const lateActionKey = `${activeEmp.name}_${d.date}`;
+                                    const action = lateActions[lateActionKey] !== undefined ? lateActions[lateActionKey] : 0;
+                                    row["Тохиргоо"] = action === -1 ? "Нийт цагаас хассан" : "Оруулаагүй";
                                 } else {
                                     row["Ирсэн/Эхлэх"] = d.start;
                                     row["Явсан/Дуусах"] = d.end;
@@ -1205,19 +1253,41 @@
                                                         <tr className="bg-rose-50 text-rose-800 text-xs uppercase sticky top-0 shadow-sm print:bg-gray-100 print:text-black print:static print:shadow-none">
                                                             <th className="p-3 font-bold print:border">Огноо</th>
                                                             <th className="p-3 font-bold text-center print:border">Ирсэн цаг</th>
-                                                            <th className="p-3 font-bold text-center print:border">Тооцох цаг</th>
+                                                            <th className="p-3 font-bold text-center print:border bg-rose-100">Тооцох цаг</th>
                                                             <th className="p-3 font-bold text-right print:border">Хоцролт (минут)</th>
+                                                            <th className="p-3 font-bold text-center min-w-[150px] no-print">Тохиргоо (Нийт цагаас)</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody className="text-sm divide-y divide-slate-100 print:divide-gray-300">
-                                                        {modalDetails.map((d, i) => (
+                                                        {modalDetails.map((d, i) => {
+                                                            const lateActionKey = `${activeEmp.name}_${d.date}`;
+                                                            return (
                                                             <tr key={i} className="hover:bg-slate-50 print:hover:bg-white">
                                                                 <td className="p-3 font-bold text-slate-800 print:border">{d.date.length > 5 && d.date.includes('-') ? d.date.substring(5) : d.date}</td>
                                                                 <td className="p-3 text-center text-rose-600 font-black print:border print:text-black">{d.start}</td>
-                                                                <td className="p-3 text-center text-slate-500 font-medium print:border">{d.end}</td>
+                                                                <td className="p-3 text-center print:border bg-rose-50/50 print:bg-white">
+                                                                    <input 
+                                                                        type="time" 
+                                                                        className="w-24 px-2 py-1.5 text-center text-sm font-bold text-rose-700 border border-rose-300 rounded focus:outline-none focus:ring-2 focus:ring-rose-500 bg-white print:border-none print:p-0 print:text-black"
+                                                                        value={lateThresholdEdits[d.date] !== undefined ? lateThresholdEdits[d.date] : ''}
+                                                                        onChange={(e) => setLateThresholdEdits({...lateThresholdEdits, [d.date]: e.target.value})}
+                                                                    />
+                                                                </td>
                                                                 <td className="p-3 text-right font-bold text-rose-600 print:border print:text-black">{d.duration} мин</td>
+                                                                <td className="p-3 text-center no-print">
+                                                                     <select
+                                                                        value={lateActions[lateActionKey] !== undefined ? lateActions[lateActionKey] : 0}
+                                                                        onChange={(e) => {
+                                                                            setLateActions(prev => ({...prev, [lateActionKey]: Number(e.target.value)}));
+                                                                        }}
+                                                                        className="w-full text-xs font-bold p-1.5 rounded border border-slate-300 focus:ring-2 focus:ring-blue-500 bg-white text-slate-700"
+                                                                    >
+                                                                        <option value={0}>⚪ Оруулахгүй (Нөлөөлөхгүй)</option>
+                                                                        <option value={-1}>➖ Хасах (Торгууль)</option>
+                                                                    </select>
+                                                                </td>
                                                             </tr>
-                                                        ))}
+                                                        )})}
                                                     </tbody>
                                                     <tfoot className="bg-slate-50 sticky bottom-0 border-t border-slate-200 print:static print:bg-gray-100">
                                                         <tr>
@@ -1225,6 +1295,7 @@
                                                             <td className="p-3 text-right font-black text-rose-700 text-base print:border print:text-black">
                                                                 {modalDetails.reduce((sum, item) => sum + item.duration, 0)} мин
                                                             </td>
+                                                            <td className="no-print"></td>
                                                         </tr>
                                                     </tfoot>
                                                 </table>
@@ -1258,7 +1329,6 @@
                                                                 </td>
                                                                 <td className="p-3 text-slate-600 text-xs print:border">{d.desc}</td>
                                                                 
-                                                                {/* Хасах/Сэргээх товч (Шинэ) */}
                                                                 <td className="p-3 text-center no-print">
                                                                     {d.id && d.date !== 'Тохиргоо' ? (
                                                                         <button 
@@ -1336,6 +1406,15 @@
                                             <button 
                                                 onClick={saveOvertimeFixes} 
                                                 className="bg-emerald-500 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-600 transition-transform transform hover:scale-105 flex items-center gap-2 shadow-lg shadow-emerald-500/30"
+                                            >
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                                Хадгалах
+                                            </button>
+                                        )}
+                                        {cellModalData.type === 'Хоцролт' && (
+                                            <button 
+                                                onClick={saveLateThresholdFixes} 
+                                                className="bg-rose-500 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-rose-600 transition-transform transform hover:scale-105 flex items-center gap-2 shadow-lg shadow-rose-500/30"
                                             >
                                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
                                                 Хадгалах
